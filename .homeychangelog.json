@@ -28,5 +28,8 @@
   },
   "1.4.2": {
     "en": "Behind the scenes: the app now uses the newer module format Homey recommends for apps. Nothing changes in what you see or in your settings and history."
+  },
+  "1.4.3": {
+    "en": "Maintenance release. Nothing changes in what you see or in your settings and history."
   }
 }
