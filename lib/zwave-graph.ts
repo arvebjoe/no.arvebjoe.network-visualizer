@@ -7,6 +7,8 @@
  * counters for it, but not the mesh: which nodes hear each other, or the route
  * Homey uses to reach one. Homey's developer tools read those with
  * `runCommand getNetworkTopology`, which needs a scope apps are not given.
+ * A read-only way to get it is requested in
+ * https://github.com/athombv/homey-web-api-issues/issues/73
  *
  * So the map is a star: every node joined straight to Homey, graded by how
  * many of Homey's transmissions to it got through, as Zigbee's hops are. The
