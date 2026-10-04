@@ -40,7 +40,9 @@ There are three front ends over the same data:
     from Matter; routes are the cheapest path from Homey's border router over the reported links.
     Matter over Wi-Fi/Ethernet hangs straight off Homey.
   - Z-Wave: a star. Apps can't read the mesh (`runCommand getNetworkTopology` needs a scope apps
-    don't get), so each device is joined straight to Homey, graded by TX counters.
+    don't get), so each device is joined straight to Homey, graded by TX counters. A read-only way to
+    read it is requested in [athombv/homey-web-api-issues#73](https://github.com/athombv/homey-web-api-issues/issues/73)
+    and on the [community forum](https://community.homey.app/t/read-only-access-to-the-z-wave-network-topology-for-apps/160355).
 - `lib/networks.ts` — `buildNetworkGraph(network, states)`, `fetchStates()` (live, from the Web API)
   and `probeStates()` (from a probe dump, which the browser view's Load dialog also accepts).
   The export is Zigbee only.
