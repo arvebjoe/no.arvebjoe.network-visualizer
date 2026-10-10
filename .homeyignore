@@ -3,3 +3,6 @@ data/
 
 # Notes for developers, not for the Homey: CLAUDE.md, todo.md, CONTRIBUTING.md and the like.
 /*.md
+
+# The README's screenshots.
+docs/
