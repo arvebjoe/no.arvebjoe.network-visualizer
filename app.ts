@@ -8,7 +8,7 @@ import { isNetworkId, NetworkId } from './lib/graph.js';
 import { buildThreadGraph, ThreadInput, trimThreadInput } from './lib/thread-graph.js';
 import { buildZwaveGraph, trimZwaveInput, ZwaveInput } from './lib/zwave-graph.js';
 import {
-  buildNetworkGraph, fetchStates, isProbe, NetworkApi, probeStates,
+  buildNetworkGraph, Diagnostics, DiagnosticsCache, fetchStates, isProbe, NetworkApi, probeStates,
 } from './lib/networks.js';
 import { startWebServer, urlHost } from './lib/web-server.js';
 import {
@@ -44,6 +44,20 @@ const LEGACY_SETTINGS_KEY = 'snapshots';
  */
 const WEB_SERVER_KEY = 'webServer';
 
+/**
+ * How long a live map waits for the Matter nodes' own diagnostics, in all.
+ * A dashboard widget's request gives up after about ten seconds, and a few
+ * sleepy devices that never answer would otherwise take longer than that.
+ */
+const LIVE_DIAGNOSTICS_BUDGET_MS = 4 * 1000;
+
+/**
+ * How long the fuller map drawn after a late answer is handed out as it is.
+ * The `graphUpdated` event makes every open map ask again at once, and they
+ * should get that map, not start another round of questions.
+ */
+const LATE_GRAPH_FRESH_MS = 30 * 1000;
+
 /** The slice of the Web API client this app uses. */
 type HomeyApiClient = NetworkApi;
 
@@ -54,6 +68,15 @@ export default class NetworkVisualizerApp extends Homey.App {
 
   /** Each network's history, on its own settings; Zigbee's also holds the imported dumps. Set up in onInit. */
   private histories: Partial<Record<NetworkId, Snapshots>> = {};
+
+  /** Each Matter node's last diagnostics, for a live map that can't wait for a slow one. */
+  private matterDiagnostics: DiagnosticsCache = new Map();
+
+  /** A live graph being built, per network, so maps that ask together share one round of questions. */
+  private liveGraphs: Partial<Record<NetworkId, Promise<Graph>>> = {};
+
+  /** The fuller graph drawn once late answers came in, per network, for LATE_GRAPH_FRESH_MS. */
+  private lateGraphs: Partial<Record<NetworkId, Graph>> = {};
 
   /** The visualizer's web server, while the browser view is switched on. */
   private webServer?: http.Server;
@@ -123,7 +146,8 @@ export default class NetworkVisualizerApp extends Homey.App {
     this.webServer = startWebServer({
       port: WEB_PORT,
       log: this.log.bind(this),
-      getGraph: (network) => this.getGraph(network),
+      // The browser view has no realtime events to hear about late answers, so it waits for them.
+      getGraph: (network) => this.getGraph(network, { complete: true }),
       listSnapshots: async (network) => this.historyOf(network)?.overview() ?? { snapshots: [] },
       readGraph: (id, network) => this.getSnapshotGraph(id, network),
       listRoutes: async (network) => this.historyOf(network)?.routes() ?? [],
@@ -188,16 +212,60 @@ export default class NetworkVisualizerApp extends Homey.App {
    * One network as a graph: every device, the links between them, the route
    * Homey uses to reach each one, and a quality grade per hop. Anything that
    * isn't a network id is taken as Zigbee, as it was before there were others.
+   * With `complete`, every Matter node is waited for, however long that takes.
    */
-  async getGraph(network: unknown = 'zigbee'): Promise<Graph> {
+  async getGraph(network: unknown = 'zigbee', { complete = false } = {}): Promise<Graph> {
     const id: NetworkId = isNetworkId(network) ? network : 'zigbee';
-    const graph = id === 'zigbee'
-      ? buildGraph(await this.getZigbeeState())
-      : buildNetworkGraph(id, await fetchStates(await this.getApi(), id));
+    if (id === 'zigbee') return this.logGraph(id, buildGraph(await this.getZigbeeState()));
+    if (complete) {
+      const states = await fetchStates(await this.getApi(), id, { cache: this.matterDiagnostics });
+      return this.logGraph(id, buildNetworkGraph(id, states));
+    }
 
+    const late = this.lateGraphs[id];
+    if (late && Date.now() - late.meta.generatedAt < LATE_GRAPH_FRESH_MS) return late;
+
+    if (!this.liveGraphs[id]) {
+      this.liveGraphs[id] = this.buildLiveGraph(id).finally(() => {
+        delete this.liveGraphs[id];
+      });
+    }
+    return this.liveGraphs[id] as Promise<Graph>;
+  }
+
+  /**
+   * A Thread or Z-Wave graph from the live state. When some Matter nodes are
+   * too slow to wait for, the graph is drawn without their fresh answers and
+   * marked as updating; once they have all answered, the fuller graph is kept
+   * for a moment and every open map is told to ask for it.
+   */
+  private async buildLiveGraph(id: NetworkId): Promise<Graph> {
+    let rest: Promise<Diagnostics> | undefined;
+    const states = await fetchStates(await this.getApi(), id, {
+      budgetMs: LIVE_DIAGNOSTICS_BUDGET_MS,
+      cache: this.matterDiagnostics,
+      late: (diagnostics) => {
+        rest = diagnostics;
+      },
+    });
+    const graph = buildNetworkGraph(id, states);
+    if (!rest) return this.logGraph(id, graph);
+
+    graph.meta.updating = true;
+    this.logGraph(id, graph);
+    rest
+      .then((diagnostics) => {
+        const fuller = buildNetworkGraph(id, { ...states, thread: { ...states.thread, diagnostics } });
+        this.lateGraphs[id] = this.logGraph(id, fuller);
+        return this.homey.api.realtime('graphUpdated', { network: id });
+      })
+      .catch((err: Error) => this.log(`Could not draw the late ${id} answers: ${err.message}`));
+    return graph;
+  }
+
+  private logGraph(id: NetworkId, graph: Graph): Graph {
     this.log(`Built ${id} graph: ${graph.meta.deviceCount} devices, ${graph.links.length} links, `
-      + `${graph.meta.weakLinkCount} weak`);
-
+      + `${graph.meta.weakLinkCount} weak${graph.meta.updating ? ', more to come' : ''}`);
     return graph;
   }
 
@@ -244,7 +312,8 @@ export default class NetworkVisualizerApp extends Homey.App {
    * history of nothing.
    */
   async getThreadSnapshotState(): Promise<ThreadInput | null> {
-    const { thread } = await fetchStates(await this.getApi(), 'thread');
+    // A snapshot waits for every node, and leaves their answers for the live maps.
+    const { thread } = await fetchStates(await this.getApi(), 'thread', { cache: this.matterDiagnostics });
     if (!thread || (!thread.topology?.length && !Object.keys(thread.matterNodes ?? {}).length)) return null;
     return trimThreadInput(thread);
   }

@@ -101,6 +101,17 @@
       .q-text-weak { color: var(--q-weak); }
       .q-text-bad { color: var(--q-bad); }
 
+      /* Some devices are still answering; a fuller map follows by itself. */
+      .updating {
+        position: absolute; right: var(--homey-su-2); top: var(--homey-su-2);
+        display: flex; align-items: center; gap: var(--homey-su-1);
+        font-size: var(--homey-font-size-small); line-height: var(--homey-line-height-small);
+        color: var(--homey-text-color-light); pointer-events: none;
+      }
+      .updating .dot { background: var(--homey-text-color-light); animation: pulse 1.2s ease-in-out infinite; }
+      @keyframes pulse { 50% { opacity: .25; } }
+      @media (prefers-reduced-motion: reduce) { .updating .dot { animation: none; } }
+
       .message {
         position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
         padding: var(--homey-su-4); text-align: center;
@@ -112,6 +123,7 @@
 
   <body class="homey-widget-full">
     <svg id="canvas" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="updating" id="updating" hidden><span class="dot"></span>Updating…</div>
     <div class="caption" id="caption" hidden></div>
     <div class="summary" id="summary" hidden></div>
     <div class="message" id="message" hidden></div>
@@ -180,11 +192,13 @@
             if (state.selected != null && !state.byAddr[state.selected]) state.selected = null;
             showMessage(view.nodes.length > 1 ? '' : 'No ' + networkName() + ' devices yet.');
             if (view.error) showMessage('Controller reports: ' + view.error);
+            document.getElementById('updating').hidden = !view.updating;
             render();
           })
           .catch(function (err) {
             // Keep the last map if there is one; a refresh that fails says so only
             // when there is nothing else to show.
+            document.getElementById('updating').hidden = true;
             if (!state.view) showMessage('Could not read the ' + networkName() + ' network: ' + ((err && err.message) || err));
           });
       }
@@ -442,6 +456,11 @@
           Homey.ready({ height: height });
         });
         setInterval(load, minutes * 60 * 1000);
+
+        // The app drew this map before every device had answered; now they have.
+        Homey.on('graphUpdated', function (data) {
+          if (data && data.network === (state.settings.network || 'zigbee')) load();
+        });
 
         if (window.ResizeObserver) new ResizeObserver(scheduleRender).observe(svg);
         window.addEventListener('resize', scheduleRender);

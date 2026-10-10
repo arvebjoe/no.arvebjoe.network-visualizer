@@ -53,6 +53,8 @@ export type WidgetLink = {
 export type WidgetView = {
   network: NetworkId;
   generatedAt: number;
+  /** Some devices were still answering; a `graphUpdated` event follows. */
+  updating: boolean;
   error: string | null;
   channel: number | null;
   /** Radii of the hop rings, innermost first. */
@@ -152,6 +154,7 @@ export function buildWidgetView(graph: Graph, options: { ghosts: boolean }): Wid
   return {
     network: graph.network,
     generatedAt: graph.meta.generatedAt,
+    updating: Boolean(graph.meta.updating),
     error: graph.meta.error ?? null,
     channel: graph.controller.channel ?? null,
     rings: Array.from({ length: maxHops }, (_, i) => (i + 1) * RING_GAP),

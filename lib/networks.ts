@@ -11,7 +11,9 @@
 
 import type { Graph, NetworkId } from './graph.js';
 import { buildGraph, ZigbeeState } from './zigbee-graph.js';
-import { buildThreadGraph, ThreadInput } from './thread-graph.js';
+import {
+  buildThreadGraph, ThreadDiagnostics, ThreadInput, WifiDiagnostics,
+} from './thread-graph.js';
 import { buildZwaveGraph, ZwaveInput } from './zwave-graph.js';
 
 export type NetworkStates = {
@@ -99,30 +101,93 @@ async function tryCall<T>(call: Call, args: Record<string, unknown> = {}): Promi
 
 type DeviceInfo = { name?: string; settings?: Record<string, unknown> };
 
+export type Diagnostics = NonNullable<ThreadInput['diagnostics']>;
+
+/**
+ * Each Matter node's last answer, kept across calls. A node that is slow this
+ * time is drawn from what it said before, rather than holding the map up.
+ */
+export type DiagnosticsCache = Map<string, Diagnostics[string]>;
+
+export type FetchOptions = {
+  /**
+   * How long to wait for the Matter nodes' diagnostics, in all. A node that
+   * hasn't answered by then gets its cached answer; its call carries on and
+   * fills the cache for next time. Without it every node is waited for.
+   */
+  budgetMs?: number;
+  cache?: DiagnosticsCache;
+  /**
+   * Called when the budget ran out with nodes still to answer, with every
+   * node's diagnostics once they all have (or have given up), so the caller
+   * can draw the fuller map then.
+   */
+  late?: (rest: Promise<Diagnostics>) => void;
+};
+
 /** Every Matter node's own network diagnostics: Thread for a Thread node, Wi-Fi for a Wi-Fi one. */
-async function matterDiagnostics(api: NetworkApi, nodes: Record<string, { network?: { type?: string } }>) {
-  const out: NonNullable<ThreadInput['diagnostics']> = {};
+async function matterDiagnostics(
+  api: NetworkApi,
+  nodes: Record<string, { network?: { type?: string } }>,
+  { budgetMs, cache, late }: FetchOptions,
+) {
+  const out: Diagnostics = {};
   const queue = Object.entries(nodes).filter(([, n]) => n.network?.type === 'thread' || n.network?.type === 'wifi');
+  const ids = queue.map(([id]) => id);
   const worker = async () => {
     for (let next = queue.shift(); next; next = queue.shift()) {
       const [id, node] = next;
       const args = { id, $timeout: NODE_TIMEOUT_MS };
-      out[id] = node.network?.type === 'thread'
-        ? { thread: (await tryCall(api.matter.nodeThreadNetworkInformation, args)) ?? null }
-        : { wifi: (await tryCall(api.matter.nodeWiFiNetworkInformation, args)) ?? null };
+      const answer = node.network?.type === 'thread'
+        ? { thread: (await tryCall<ThreadDiagnostics>(api.matter.nodeThreadNetworkInformation, args)) ?? null }
+        : { wifi: (await tryCall<WifiDiagnostics>(api.matter.nodeWiFiNetworkInformation, args)) ?? null };
+      out[id] = answer;
+      if (cache && (answer.thread || answer.wifi)) cache.set(id, answer);
     }
   };
-  await Promise.all(Array.from({ length: Math.min(NODE_CONCURRENCY, queue.length) }, worker));
-  return out;
+  const all = Promise.all(Array.from({ length: Math.min(NODE_CONCURRENCY, queue.length) }, worker));
+  if (budgetMs == null) {
+    await all;
+    return out;
+  }
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // Cleared as soon as the race is over, so it never outlives the call.
+  const deadline = new Promise<'late'>((resolve) => {
+    timer = setTimeout(() => resolve('late'), budgetMs); // eslint-disable-line homey-app/global-timers
+  });
+  const outcome = await Promise.race([all, deadline]);
+  clearTimeout(timer);
+
+  // A node that hasn't answered, or answered nothing, falls back to its last answer.
+  const withFallback = (): Diagnostics => {
+    const result: Diagnostics = {};
+    ids.forEach((id) => {
+      const answer = out[id];
+      const cached = cache?.get(id);
+      if (answer && (answer.thread || answer.wifi)) result[id] = answer;
+      else if (cached) result[id] = cached;
+      else if (answer) result[id] = answer;
+    });
+    return result;
+  };
+  if (outcome === 'late') late?.(all.then(withFallback));
+  return withFallback();
 }
 
 /** One network's live state, read from the Web API, in the shape the builders take. */
-export async function fetchStates(api: NetworkApi, network: NetworkId): Promise<NetworkStates> {
+export async function fetchStates(
+  api: NetworkApi,
+  network: NetworkId,
+  options: FetchOptions = {},
+): Promise<NetworkStates> {
   if (network === 'zigbee') return { zigbee: await api.zigbee.getState() as ZigbeeState };
 
-  const devices = (await tryCall<Record<string, DeviceInfo>>(api.devices.getDevices)) ?? {};
+  // Asked alongside the network's own calls, not before them: on a big Homey it isn't quick.
+  const devicesCall = tryCall<Record<string, DeviceInfo>>(api.devices.getDevices);
 
   if (network === 'zwave') {
+    const devices = (await devicesCall) ?? {};
     // A device with several channels is several Homey devices on one node; the first name will do.
     const deviceNames: Record<string, string> = {};
     Object.values(devices).forEach((d) => {
@@ -132,10 +197,11 @@ export async function fetchStates(api: NetworkApi, network: NetworkId): Promise<
     return { zwave: { state: await api.zwave.getState() as ZwaveInput['state'], deviceNames } };
   }
 
-  const [state, topology, matterNodes] = await Promise.all([
+  const [state, topology, matterNodes, devices = {}] = await Promise.all([
     tryCall<ThreadInput['state']>(api.thread.getState),
     tryCall<ThreadInput['topology']>(api.thread.getNetworkTopology),
     tryCall<Record<string, { network?: { type?: string } }>>(api.matter.getMatterNodes),
+    devicesCall,
   ]);
   const deviceNames: Record<string, string> = {};
   Object.entries(devices).forEach(([id, d]) => {
@@ -146,7 +212,7 @@ export async function fetchStates(api: NetworkApi, network: NetworkId): Promise<
       state: state ?? null,
       topology: topology ?? null,
       matterNodes: (matterNodes ?? null) as ThreadInput['matterNodes'],
-      diagnostics: matterNodes ? await matterDiagnostics(api, matterNodes) : {},
+      diagnostics: matterNodes ? await matterDiagnostics(api, matterNodes, options) : {},
       deviceNames,
       error: topology === undefined && matterNodes === undefined ? 'Homey didn\'t answer for Thread or Matter' : null,
     },

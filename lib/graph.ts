@@ -157,6 +157,11 @@ export type Graph = {
     error?: string | null;
     /** Something the page should say about the whole map, e.g. what the network doesn't tell us. */
     notice?: string;
+    /**
+     * Some devices were still answering when this was drawn; the app sends a
+     * `graphUpdated` realtime event with the network's id once they have.
+     */
+    updating?: boolean;
     nodeCount: number;
     deviceCount: number;
     routerCount: number;

@@ -45,7 +45,14 @@ There are three front ends over the same data:
     and on the [community forum](https://community.homey.app/t/read-only-access-to-the-z-wave-network-topology-for-apps/160355).
 - `lib/networks.ts` — `buildNetworkGraph(network, states)`, `fetchStates()` (live, from the Web API)
   and `probeStates()` (from a probe dump, which the browser view's Load dialog also accepts).
-  The export is Zigbee only.
+  The export is Zigbee only. Each Matter node is asked for its own diagnostics, and sleepy ones can take
+  seconds or never answer, which once made the widget time out (its request seems to give up after about 10 s, judging by a user's logs). So a
+  live map waits at most `LIVE_DIAGNOSTICS_BUDGET_MS` (`app.ts`), drawing slow nodes from their last
+  answer (`DiagnosticsCache`, which snapshots also fill), and marks the graph `meta.updating`. When the
+  rest have answered, the app keeps the fuller graph for `LATE_GRAPH_FRESH_MS` and emits the realtime
+  event `graphUpdated` (`{ network }`); the widget and the settings page reload on it and get that kept
+  graph, so a reload can't start another round. Snapshots and the browser view (no realtime) wait for
+  every node.
 - `lib/widget-view.ts` — `buildWidgetView()`: the widget's view of a graph, with the settings page's
   radial-tree layout done on the Homey. The settings page still has its own copy of that layout in
   its script.
